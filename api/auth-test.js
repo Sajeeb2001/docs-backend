@@ -2,12 +2,31 @@ import { google } from "googleapis";
 import { Readable } from "stream";
 
 export default async function handler(req, res) {
+  /* ========= CORS ========= */
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+
+  // Handle preflight request
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  /* ======================== */
+
   try {
     console.log("RAW BODY:", req.body);
 
     const { docId, signatureBase64 } = req.body;
     if (!docId || !signatureBase64) {
-      return res.status(400).json({ success: false, error: "Missing fields" });
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing fields" });
     }
 
     /* ========= AUTH ========= */
@@ -25,7 +44,10 @@ export default async function handler(req, res) {
     const docs = google.docs({ version: "v1", auth });
 
     /* ========= BASE64 → STREAM ========= */
-    const base64 = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
+    const base64 = signatureBase64.replace(
+      /^data:image\/\w+;base64,/,
+      ""
+    );
     const buffer = Buffer.from(base64, "base64");
     const stream = Readable.from(buffer);
 
@@ -39,7 +61,7 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: stream, // ✅ FIXED
+        body: stream,
       },
       fields: "id",
     });
@@ -61,7 +83,9 @@ export default async function handler(req, res) {
     /* ========= FIND PLACEHOLDER ========= */
     const PLACEHOLDER = "{{SIGNATURE}}";
 
-    const document = await docs.documents.get({ documentId: docId });
+    const document = await docs.documents.get({
+      documentId: docId,
+    });
     const content = document.data.body.content;
 
     let insertIndex = null;
@@ -119,6 +143,8 @@ export default async function handler(req, res) {
     res.json({ success: true });
   } catch (err) {
     console.error("Insert signature error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res
+      .status(500)
+      .json({ success: false, error: err.message });
   }
 }
