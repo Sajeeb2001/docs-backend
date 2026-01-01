@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
@@ -39,7 +40,12 @@ export default async function handler(req, res) {
     const imageBuffer = Buffer.from(base64Data, "base64");
 
     /* ===============================
-       3️⃣ UPLOAD IMAGE TO SHARED DRIVE
+       3️⃣ BUFFER → STREAM (CRITICAL FIX)
+    ================================ */
+    const imageStream = Readable.from(imageBuffer);
+
+    /* ===============================
+       4️⃣ UPLOAD IMAGE TO SHARED DRIVE
     ================================ */
     const upload = await drive.files.create({
       supportsAllDrives: true,
@@ -50,7 +56,7 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: imageBuffer,
+        body: imageStream, // ✅ MUST BE STREAM
       },
       fields: "id",
     });
@@ -58,7 +64,7 @@ export default async function handler(req, res) {
     const fileId = upload.data.id;
 
     /* ===============================
-       4️⃣ MAKE IMAGE PUBLIC (DOCS NEEDS THIS)
+       5️⃣ MAKE IMAGE PUBLIC
     ================================ */
     await drive.permissions.create({
       fileId,
@@ -72,7 +78,7 @@ export default async function handler(req, res) {
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
     /* ===============================
-       5️⃣ INSERT IMAGE ONLY (SAFE MODE)
+       6️⃣ INSERT IMAGE ONLY (SAFE)
     ================================ */
     await docs.documents.batchUpdate({
       documentId: docId,
