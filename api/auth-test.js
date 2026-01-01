@@ -1,48 +1,33 @@
 import { google } from "googleapis";
-import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
     console.log("RAW BODY:", req.body);
 
     const { docId, signatureBase64 } = req.body;
-
     if (!docId || !signatureBase64) {
-      return res.status(400).json({
-        success: false,
-        error: "docId and signatureBase64 are required",
-      });
+      return res.status(400).json({ success: false, error: "Missing fields" });
     }
 
-    /* ===============================
-       1️⃣ AUTH
-    ================================ */
-    const auth = new google.auth.JWT({
-      email: process.env.GOOGLE_CLIENT_EMAIL,
-      key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      scopes: [
+    /* ================= AUTH ================= */
+    const auth = new google.auth.JWT(
+      process.env.GOOGLE_CLIENT_EMAIL,
+      null,
+      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/documents",
-      ],
-    });
+      ]
+    );
 
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* ===============================
-       2️⃣ BASE64 → BUFFER → STREAM
-    ================================ */
-    const base64Data = signatureBase64.replace(
-      /^data:image\/\w+;base64,/,
-      ""
-    );
+    /* ================= BASE64 → BUFFER ================= */
+    const base64 = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
+    const imageBuffer = Buffer.from(base64, "base64");
 
-    const imageBuffer = Buffer.from(base64Data, "base64");
-    const imageStream = Readable.from(imageBuffer);
-
-    /* ===============================
-       3️⃣ UPLOAD TO SHARED DRIVE
-    ================================ */
+    /* ================= UPLOAD TO SHARED DRIVE ================= */
     const upload = await drive.files.create({
       supportsAllDrives: true,
       requestBody: {
@@ -52,16 +37,14 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: imageStream,
+        body: imageBuffer,
       },
       fields: "id",
     });
 
     const fileId = upload.data.id;
 
-    /* ===============================
-       4️⃣ MAKE IMAGE PUBLIC
-    ================================ */
+    /* ================= MAKE IMAGE PUBLIC ================= */
     await drive.permissions.create({
       fileId,
       supportsAllDrives: true,
@@ -73,45 +56,68 @@ export default async function handler(req, res) {
 
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    /* ===============================
-       5️⃣ GET DOCUMENT END INDEX
-    ================================ */
-    const doc = await docs.documents.get({ documentId: docId });
+    /* ================= FIND {{SIGNATURE}} PLACEHOLDER ================= */
+    const PLACEHOLDER = "{{SIGNATURE}}";
 
-    const body = doc.data.body.content;
-    const lastElement = body[body.length - 1];
-    const endIndex = lastElement.endIndex - 1;
+    const document = await docs.documents.get({ documentId: docId });
+    const content = document.data.body.content;
 
-    /* ===============================
-       6️⃣ INSERT SIGNATURE IMAGE
-    ================================ */
-    await docs.documents.batchUpdate({
-      documentId: docId,
-      requestBody: {
-        requests: [
-          {
-            insertInlineImage: {
-              uri: imageUrl,
-              location: { index: endIndex },
-              objectSize: {
-                width: { magnitude: 250, unit: "PT" },
-                height: { magnitude: 80, unit: "PT" },
-              },
-            },
-          },
-        ],
+    let insertIndex = null;
+    let deleteRange = null;
+
+    for (const element of content) {
+      if (!element.paragraph) continue;
+
+      for (const el of element.paragraph.elements || []) {
+        const text = el.textRun?.content;
+        if (!text) continue;
+
+        const pos = text.indexOf(PLACEHOLDER);
+        if (pos !== -1) {
+          insertIndex = el.startIndex + pos;
+          deleteRange = {
+            startIndex: insertIndex,
+            endIndex: insertIndex + PLACEHOLDER.length,
+          };
+          break;
+        }
+      }
+      if (insertIndex !== null) break;
+    }
+
+    /* ================= BUILD REQUESTS ================= */
+    const requests = [];
+
+    if (deleteRange) {
+      requests.push({
+        deleteContentRange: { range: deleteRange },
+      });
+    }
+
+    requests.push({
+      insertInlineImage: {
+        uri: imageUrl,
+        location: {
+          index:
+            insertIndex ??
+            document.data.body.content.at(-1).endIndex - 1,
+        },
+        objectSize: {
+          width: { magnitude: 250, unit: "PT" },
+          height: { magnitude: 80, unit: "PT" },
+        },
       },
     });
 
-    return res.json({
-      success: true,
-      fileId,
+    /* ================= INSERT IMAGE ================= */
+    await docs.documents.batchUpdate({
+      documentId: docId,
+      requestBody: { requests },
     });
+
+    res.json({ success: true });
   } catch (err) {
     console.error("Insert signature error:", err);
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 }
