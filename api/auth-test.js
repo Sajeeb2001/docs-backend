@@ -1,5 +1,20 @@
 import { google } from "googleapis";
-import { Buffer } from "buffer";
+import { Readable } from "stream";
+
+/**
+ * Convert base64 image → Readable stream
+ */
+function base64ToStream(base64Data) {
+  const buffer = Buffer.from(
+    base64Data.replace(/^data:image\/png;base64,/, ""),
+    "base64"
+  );
+
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+  return stream;
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -13,7 +28,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Auth
+    // 🔐 Google Auth (Service Account)
     const auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
       scopes: [
@@ -22,40 +37,39 @@ export default async function handler(req, res) {
       ]
     });
 
-    const drive = google.drive({ version: "v3", auth });
-    const docs = google.docs({ version: "v1", auth });
+    const authClient = await auth.getClient();
 
-    // Convert base64 → buffer
-    const base64Data = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
-    const buffer = Buffer.from(base64Data, "base64");
+    const drive = google.drive({ version: "v3", auth: authClient });
+    const docs = google.docs({ version: "v1", auth: authClient });
 
-    // 1️⃣ Upload image to Drive
-    const file = await drive.files.create({
+    // 🖼️ Upload signature image to Drive
+    const imageStream = base64ToStream(signatureBase64);
+
+    const uploadRes = await drive.files.create({
       requestBody: {
         name: `signature-${Date.now()}.png`,
         mimeType: "image/png"
       },
       media: {
         mimeType: "image/png",
-        body: buffer
+        body: imageStream
       }
     });
 
-    const fileId = file.data.id;
+    const imageFileId = uploadRes.data.id;
 
-    // 2️⃣ Make it public
+    // 🔓 Make image readable by Docs (internal only)
     await drive.permissions.create({
-      fileId,
+      fileId: imageFileId,
       requestBody: {
         role: "reader",
         type: "anyone"
       }
     });
 
-    // 3️⃣ Get public URL
-    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
+    const imageUrl = `https://drive.google.com/uc?id=${imageFileId}`;
 
-    // 4️⃣ Insert into Google Doc
+    // ✍️ Insert text + image into Google Doc
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: {
@@ -63,16 +77,16 @@ export default async function handler(req, res) {
           {
             insertText: {
               location: { index: 1 },
-              text: `\n\nSigned by: ${signerName}\nDate: ${new Date().toLocaleDateString()}\n`
+              text: `\n\nSigned by: ${signerName}\nDate: ${new Date().toLocaleDateString()}\n\n`
             }
           },
           {
             insertInlineImage: {
-              location: { index: 2 },
+              location: { index: 1 },
               uri: imageUrl,
               objectSize: {
-                height: { magnitude: 80, unit: "PT" },
-                width: { magnitude: 250, unit: "PT" }
+                width: { magnitude: 250, unit: "PT" },
+                height: { magnitude: 80, unit: "PT" }
               }
             }
           }
@@ -80,14 +94,15 @@ export default async function handler(req, res) {
       }
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "Signature inserted into document"
+      message: "Signature inserted into Google Doc",
+      imageFileId
     });
 
   } catch (error) {
     console.error("Insert signature error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message
     });
