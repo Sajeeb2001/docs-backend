@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { Buffer } from "buffer";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -6,15 +7,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { docId, signatureBase64, signerName } = req.body;
+    const { docId, signerName, signatureBase64 } = req.body;
 
-    if (!docId || !signatureBase64) {
-      return res.status(400).json({
-        error: "Missing docId or signatureBase64"
-      });
+    if (!docId || !signerName || !signatureBase64) {
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 🔐 Auth
+    // Auth
     const auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
       scopes: [
@@ -23,66 +22,74 @@ export default async function handler(req, res) {
       ]
     });
 
-    const authClient = await auth.getClient();
+    const drive = google.drive({ version: "v3", auth });
+    const docs = google.docs({ version: "v1", auth });
 
-    const docs = google.docs({ version: "v1", auth: authClient });
-    const drive = google.drive({ version: "v3", auth: authClient });
+    // Convert base64 → buffer
+    const base64Data = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
 
-    // 📄 Get document to find end index
-    const doc = await docs.documents.get({ documentId: docId });
-    const body = doc.data.body.content;
-    const endIndex = body[body.length - 1].endIndex - 1;
-
-    // 🖼 Convert Base64 → raw bytes
-    const imageBase64 = signatureBase64.replace(/^data:image\/png;base64,/, "");
-    const imageBytes = Buffer.from(imageBase64, "base64");
-
-    // 🧾 Insert signature + optional text
-    const requests = [
-      {
-        insertText: {
-          location: { index: endIndex },
-          text: `\n\nSigned by: ${signerName || "Client"}\nDate: ${new Date().toLocaleDateString()}\n`
-        }
+    // 1️⃣ Upload image to Drive
+    const file = await drive.files.create({
+      requestBody: {
+        name: `signature-${Date.now()}.png`,
+        mimeType: "image/png"
       },
-      {
-        insertInlineImage: {
-          location: { index: endIndex + 1 },
-          uri: `data:image/png;base64,${imageBase64}`,
-          objectSize: {
-            height: { magnitude: 80, unit: "PT" },
-            width: { magnitude: 250, unit: "PT" }
-          }
-        }
+      media: {
+        mimeType: "image/png",
+        body: buffer
       }
-    ];
-
-    await docs.documents.batchUpdate({
-      documentId: docId,
-      requestBody: { requests }
     });
 
-    // 📤 Export PDF
-    const pdfResponse = await drive.files.export(
-      { fileId: docId, mimeType: "application/pdf" },
-      { responseType: "arraybuffer" }
-    );
+    const fileId = file.data.id;
 
-    const pdfBuffer = Buffer.from(pdfResponse.data);
+    // 2️⃣ Make it public
+    await drive.permissions.create({
+      fileId,
+      requestBody: {
+        role: "reader",
+        type: "anyone"
+      }
+    });
 
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="signed-document.pdf"`
-    );
+    // 3️⃣ Get public URL
+    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    return res.status(200).send(pdfBuffer);
+    // 4️⃣ Insert into Google Doc
+    await docs.documents.batchUpdate({
+      documentId: docId,
+      requestBody: {
+        requests: [
+          {
+            insertText: {
+              location: { index: 1 },
+              text: `\n\nSigned by: ${signerName}\nDate: ${new Date().toLocaleDateString()}\n`
+            }
+          },
+          {
+            insertInlineImage: {
+              location: { index: 2 },
+              uri: imageUrl,
+              objectSize: {
+                height: { magnitude: 80, unit: "PT" },
+                width: { magnitude: 250, unit: "PT" }
+              }
+            }
+          }
+        ]
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Signature inserted into document"
+    });
 
   } catch (error) {
     console.error("Insert signature error:", error);
-    return res.status(500).json({
-      error: "Failed to insert signature",
-      details: error.message
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 }
