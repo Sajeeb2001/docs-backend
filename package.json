@@ -1,8 +1,8 @@
 {
-  "name": "docs-backend",
+  "name": "docs-signature-backend",
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "googleapis": "^134.0.0"
+    "googleapis": "^144.0.0"
   }
 }
