@@ -30,7 +30,7 @@ export default async function handler(req, res) {
     const docs = google.docs({ version: "v1", auth });
 
     /* ===============================
-       2️⃣ BASE64 → BUFFER
+       2️⃣ BASE64 → BUFFER → STREAM
     ================================ */
     const base64Data = signatureBase64.replace(
       /^data:image\/\w+;base64,/,
@@ -38,14 +38,10 @@ export default async function handler(req, res) {
     );
 
     const imageBuffer = Buffer.from(base64Data, "base64");
-
-    /* ===============================
-       3️⃣ BUFFER → STREAM (CRITICAL FIX)
-    ================================ */
     const imageStream = Readable.from(imageBuffer);
 
     /* ===============================
-       4️⃣ UPLOAD IMAGE TO SHARED DRIVE
+       3️⃣ UPLOAD TO SHARED DRIVE
     ================================ */
     const upload = await drive.files.create({
       supportsAllDrives: true,
@@ -56,7 +52,7 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: imageStream, // ✅ MUST BE STREAM
+        body: imageStream,
       },
       fields: "id",
     });
@@ -64,7 +60,7 @@ export default async function handler(req, res) {
     const fileId = upload.data.id;
 
     /* ===============================
-       5️⃣ MAKE IMAGE PUBLIC
+       4️⃣ MAKE IMAGE PUBLIC
     ================================ */
     await drive.permissions.create({
       fileId,
@@ -78,7 +74,16 @@ export default async function handler(req, res) {
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
     /* ===============================
-       6️⃣ INSERT IMAGE ONLY (SAFE)
+       5️⃣ GET DOCUMENT END INDEX
+    ================================ */
+    const doc = await docs.documents.get({ documentId: docId });
+
+    const body = doc.data.body.content;
+    const lastElement = body[body.length - 1];
+    const endIndex = lastElement.endIndex - 1;
+
+    /* ===============================
+       6️⃣ INSERT SIGNATURE IMAGE
     ================================ */
     await docs.documents.batchUpdate({
       documentId: docId,
@@ -87,9 +92,7 @@ export default async function handler(req, res) {
           {
             insertInlineImage: {
               uri: imageUrl,
-              location: {
-                endOfSegmentLocation: {},
-              },
+              location: { index: endIndex },
               objectSize: {
                 width: { magnitude: 250, unit: "PT" },
                 height: { magnitude: 80, unit: "PT" },
