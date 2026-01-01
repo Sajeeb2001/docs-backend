@@ -1,22 +1,16 @@
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
-    console.log("RAW BODY:", req.body); // 🔍 DEBUG — KEEP THIS
+    console.log("RAW BODY:", req.body);
 
-    if (req.method !== "POST") {
-      return res.status(405).json({ success: false, error: "Method not allowed" });
-    }
+    const { docId, signerName, signatureBase64 } = req.body;
 
-    const body = req.body || {};
-    const { docId, signerName, signatureBase64 } = body;
-
-    /* 🔒 HARD VALIDATION */
-    if (!docId || !signatureBase64 || typeof signatureBase64 !== "string") {
+    if (!docId || !signatureBase64) {
       return res.status(400).json({
         success: false,
-        error: "Missing or invalid fields",
-        received: body,
+        error: "Missing docId or signatureBase64",
       });
     }
 
@@ -24,7 +18,7 @@ export default async function handler(req, res) {
     const auth = new google.auth.JWT(
       process.env.GOOGLE_CLIENT_EMAIL,
       null,
-      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      process.env.GOOGLE_PRIVATE_KEY, // 🔴 PASTE KEY AS ONE LINE (NO REPLACE)
       [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/documents",
@@ -34,32 +28,31 @@ export default async function handler(req, res) {
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* 2️⃣ BASE64 → BUFFER (CRITICAL) */
-    const cleanedBase64 = signatureBase64.replace(
-      /^data:image\/(png|jpeg|jpg);base64,/,
-      ""
-    );
+    /* 2️⃣ BASE64 → BUFFER */
+    const base64Data = signatureBase64.split(",")[1];
+    const imageBuffer = Buffer.from(base64Data, "base64");
 
-    const imageBuffer = Buffer.from(cleanedBase64, "base64");
+    /* 3️⃣ BUFFER → STREAM (CRITICAL FIX) */
+    const imageStream = Readable.from(imageBuffer);
 
-    /* 3️⃣ UPLOAD IMAGE TO SHARED DRIVE */
-    const uploadResponse = await drive.files.create({
+    /* 4️⃣ UPLOAD TO SHARED DRIVE */
+    const upload = await drive.files.create({
       requestBody: {
         name: `signature-${Date.now()}.png`,
+        parents: [process.env.SHARED_DRIVE_FOLDER_ID],
         mimeType: "image/png",
-        parents: [process.env.SHARED_DRIVE_FOLDER_ID], // MUST be Shared Drive
       },
       media: {
         mimeType: "image/png",
-        body: imageBuffer, // ✅ BUFFER ONLY
+        body: imageStream, // ✅ MUST BE STREAM
       },
       supportsAllDrives: true,
       fields: "id",
     });
 
-    const fileId = uploadResponse.data.id;
+    const fileId = upload.data.id;
 
-    /* 4️⃣ MAKE IMAGE PUBLIC (DOCS NEEDS THIS) */
+    /* 5️⃣ MAKE IMAGE PUBLIC (FOR DOCS ACCESS) */
     await drive.permissions.create({
       fileId,
       supportsAllDrives: true,
@@ -71,7 +64,7 @@ export default async function handler(req, res) {
 
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    /* 5️⃣ INSERT INTO GOOGLE DOC */
+    /* 6️⃣ INSERT INTO GOOGLE DOC */
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: {
@@ -96,26 +89,13 @@ export default async function handler(req, res) {
       },
     });
 
-    return res.status(200).json({
-      success: true,
-      message: "Signature inserted into document",
-      imageUrl,
-    });
+    return res.json({ success: true });
 
-  } catch (error) {
-    console.error("Insert signature error:", error);
+  } catch (err) {
+    console.error("Insert signature error:", err);
     return res.status(500).json({
       success: false,
-      error: error.message,
+      error: err.message,
     });
   }
 }
-
-/* 🧠 VERCEL BODY PARSER FIX (MANDATORY) */
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "10mb", // base64 images
-    },
-  },
-};
