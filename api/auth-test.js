@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
@@ -9,7 +10,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ success: false, error: "Missing fields" });
     }
 
-    /* ================= AUTH ================= */
+    /* ========= AUTH ========= */
     const auth = new google.auth.JWT(
       process.env.GOOGLE_CLIENT_EMAIL,
       null,
@@ -23,11 +24,12 @@ export default async function handler(req, res) {
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* ================= BASE64 → BUFFER ================= */
+    /* ========= BASE64 → STREAM ========= */
     const base64 = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
-    const imageBuffer = Buffer.from(base64, "base64");
+    const buffer = Buffer.from(base64, "base64");
+    const stream = Readable.from(buffer);
 
-    /* ================= UPLOAD TO SHARED DRIVE ================= */
+    /* ========= UPLOAD IMAGE ========= */
     const upload = await drive.files.create({
       supportsAllDrives: true,
       requestBody: {
@@ -37,14 +39,14 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: imageBuffer,
+        body: stream, // ✅ FIXED
       },
       fields: "id",
     });
 
     const fileId = upload.data.id;
 
-    /* ================= MAKE IMAGE PUBLIC ================= */
+    /* ========= MAKE PUBLIC ========= */
     await drive.permissions.create({
       fileId,
       supportsAllDrives: true,
@@ -56,7 +58,7 @@ export default async function handler(req, res) {
 
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    /* ================= FIND {{SIGNATURE}} PLACEHOLDER ================= */
+    /* ========= FIND PLACEHOLDER ========= */
     const PLACEHOLDER = "{{SIGNATURE}}";
 
     const document = await docs.documents.get({ documentId: docId });
@@ -65,10 +67,10 @@ export default async function handler(req, res) {
     let insertIndex = null;
     let deleteRange = null;
 
-    for (const element of content) {
-      if (!element.paragraph) continue;
+    for (const block of content) {
+      if (!block.paragraph) continue;
 
-      for (const el of element.paragraph.elements || []) {
+      for (const el of block.paragraph.elements || []) {
         const text = el.textRun?.content;
         if (!text) continue;
 
@@ -85,7 +87,7 @@ export default async function handler(req, res) {
       if (insertIndex !== null) break;
     }
 
-    /* ================= BUILD REQUESTS ================= */
+    /* ========= INSERT IMAGE ========= */
     const requests = [];
 
     if (deleteRange) {
@@ -109,7 +111,6 @@ export default async function handler(req, res) {
       },
     });
 
-    /* ================= INSERT IMAGE ================= */
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: { requests },
