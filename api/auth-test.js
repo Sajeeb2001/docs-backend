@@ -2,72 +2,86 @@ import { google } from "googleapis";
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
     const { docId, signerName, signatureBase64 } = req.body;
-
-    if (!docId || !signerName || !signatureBase64) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!docId || !signatureBase64) {
+      return res.status(400).json({ error: "Missing data" });
     }
 
-    // ---- Google Auth ----
     const auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
-      scopes: ["https://www.googleapis.com/auth/documents"]
+      scopes: [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/documents"
+      ]
     });
 
-    const docs = google.docs({
-      version: "v1",
-      auth: await auth.getClient()
-    });
+    const authClient = await auth.getClient();
+    const drive = google.drive({ version: "v3", auth: authClient });
+    const docs = google.docs({ version: "v1", auth: authClient });
 
-    // ---- Convert base64 to inline image URL ----
-    // Google Docs REQUIRES a URL, but it only needs it temporarily.
-    const cleanBase64 = signatureBase64.replace(
-      /^data:image\/png;base64,/,
-      ""
-    );
+    // 🔹 Decode base64
+    const base64Data = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
+    const imageBuffer = Buffer.from(base64Data, "base64");
 
-    const imageUrl =
-      "data:image/png;base64," + cleanBase64;
-
-    // ---- Insert text + image ----
-    const requests = [
-      {
-        insertText: {
-          location: { index: 1 },
-          text: `\n\nSigned by: ${signerName}\nDate: ${new Date().toLocaleDateString()}\n`
-        }
+    // 🔹 Upload to Shared Drive
+    const file = await drive.files.create({
+      supportsAllDrives: true,
+      requestBody: {
+        name: `signature-${Date.now()}.png`,
+        mimeType: "image/png",
+        parents: [process.env.GOOGLE_SHARED_DRIVE_ID]
       },
-      {
-        insertInlineImage: {
-          location: { index: 1 },
-          uri: imageUrl,
-          objectSize: {
-            width: { magnitude: 250, unit: "PT" },
-            height: { magnitude: 80, unit: "PT" }
-          }
-        }
+      media: {
+        mimeType: "image/png",
+        body: imageBuffer
       }
-    ];
+    });
 
+    const fileId = file.data.id;
+
+    // 🔹 Make image public
+    await drive.permissions.create({
+      supportsAllDrives: true,
+      fileId,
+      requestBody: {
+        role: "reader",
+        type: "anyone"
+      }
+    });
+
+    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
+
+    // 🔹 Insert into Google Doc
     await docs.documents.batchUpdate({
       documentId: docId,
-      requestBody: { requests }
+      requestBody: {
+        requests: [
+          {
+            insertText: {
+              location: { index: 1 },
+              text: `\n\nSigned by: ${signerName}\n`
+            }
+          },
+          {
+            insertInlineImage: {
+              location: { index: 1 },
+              uri: imageUrl,
+              objectSize: {
+                width: { magnitude: 250, unit: "PT" }
+              }
+            }
+          }
+        ]
+      }
     });
 
-    res.status(200).json({
+    res.json({
       success: true,
-      message: "Signature successfully added to Google Doc"
+      imageUrl
     });
 
-  } catch (error) {
-    console.error("Insert signature error:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+  } catch (err) {
+    console.error("Insert signature error:", err);
+    res.status(500).json({ error: err.message });
   }
 }
