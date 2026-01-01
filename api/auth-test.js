@@ -1,11 +1,15 @@
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
     const { docId, signerName, signatureBase64 } = req.body;
 
     if (!docId || !signatureBase64) {
-      return res.status(400).json({ success: false, error: "Missing fields" });
+      return res.status(400).json({
+        success: false,
+        error: "docId and signatureBase64 are required",
+      });
     }
 
     /* 1️⃣ AUTH */
@@ -22,11 +26,14 @@ export default async function handler(req, res) {
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* 2️⃣ BASE64 → BUFFER (CRITICAL FIX) */
-    const base64Data = signatureBase64.replace(/^data:image\/\w+;base64,/, "");
+    /* 2️⃣ BASE64 → BUFFER */
+    const base64Data = signatureBase64.replace(
+      /^data:image\/\w+;base64,/,
+      ""
+    );
     const imageBuffer = Buffer.from(base64Data, "base64");
 
-    /* 3️⃣ UPLOAD IMAGE TO SHARED DRIVE FOLDER */
+    /* 3️⃣ UPLOAD IMAGE TO SHARED DRIVE */
     const upload = await drive.files.create({
       requestBody: {
         name: `signature-${Date.now()}.png`,
@@ -35,7 +42,7 @@ export default async function handler(req, res) {
       },
       media: {
         mimeType: "image/png",
-        body: imageBuffer, // ✅ MUST be Buffer
+        body: Readable.from(imageBuffer), // ✅ FIX
       },
       supportsAllDrives: true,
       fields: "id",
@@ -43,7 +50,7 @@ export default async function handler(req, res) {
 
     const fileId = upload.data.id;
 
-    /* 4️⃣ MAKE FILE READABLE BY DOCS */
+    /* 4️⃣ MAKE FILE PUBLIC (REQUIRED FOR DOCS) */
     await drive.permissions.create({
       fileId,
       supportsAllDrives: true,
@@ -83,6 +90,9 @@ export default async function handler(req, res) {
     res.json({ success: true });
   } catch (err) {
     console.error("Insert signature error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 }
