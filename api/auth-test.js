@@ -14,11 +14,13 @@ export default async function handler(req, res) {
       });
     }
 
-    /* 1️⃣ AUTH (SERVICE ACCOUNT) */
+    /* ===============================
+       1️⃣ GOOGLE AUTH (CORRECT)
+    =============================== */
     const auth = new google.auth.JWT(
       process.env.GOOGLE_CLIENT_EMAIL,
       null,
-      process.env.GOOGLE_PRIVATE_KEY, // 🔴 PASTE KEY AS ONE LINE (NO REPLACE)
+      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
       [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/documents",
@@ -28,34 +30,48 @@ export default async function handler(req, res) {
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* 2️⃣ BASE64 → BUFFER */
-    const base64Data = signatureBase64.split(",")[1];
-    const imageBuffer = Buffer.from(base64Data, "base64");
+    /* ===============================
+       2️⃣ BASE64 → BUFFER
+    =============================== */
+    const base64Clean = signatureBase64.replace(
+      /^data:image\/png;base64,/,
+      ""
+    );
 
-    /* 3️⃣ BUFFER → STREAM (CRITICAL FIX) */
-    const imageStream = Readable.from(imageBuffer);
+    const imageBuffer = Buffer.from(base64Clean, "base64");
 
-    /* 4️⃣ UPLOAD TO SHARED DRIVE */
+    /* ===============================
+       3️⃣ BUFFER → STREAM (CRITICAL FIX)
+    =============================== */
+    const stream = new Readable();
+    stream.push(imageBuffer);
+    stream.push(null);
+
+    /* ===============================
+       4️⃣ UPLOAD TO SHARED DRIVE
+    =============================== */
     const upload = await drive.files.create({
+      supportsAllDrives: true,
       requestBody: {
         name: `signature-${Date.now()}.png`,
-        parents: [process.env.SHARED_DRIVE_FOLDER_ID],
         mimeType: "image/png",
+        parents: [process.env.SHARED_DRIVE_FOLDER_ID],
       },
       media: {
         mimeType: "image/png",
-        body: imageStream, // ✅ MUST BE STREAM
+        body: stream, // ✅ MUST be stream
       },
-      supportsAllDrives: true,
       fields: "id",
     });
 
     const fileId = upload.data.id;
 
-    /* 5️⃣ MAKE IMAGE PUBLIC (FOR DOCS ACCESS) */
+    /* ===============================
+       5️⃣ MAKE FILE PUBLIC (READ)
+    =============================== */
     await drive.permissions.create({
-      fileId,
       supportsAllDrives: true,
+      fileId,
       requestBody: {
         role: "reader",
         type: "anyone",
@@ -64,7 +80,9 @@ export default async function handler(req, res) {
 
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    /* 6️⃣ INSERT INTO GOOGLE DOC */
+    /* ===============================
+       6️⃣ INSERT INTO GOOGLE DOC
+    =============================== */
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: {
@@ -72,7 +90,9 @@ export default async function handler(req, res) {
           {
             insertText: {
               location: { index: 1 },
-              text: `\n\nSigned by: ${signerName || "Customer"}\nDate: ${new Date().toLocaleDateString()}\n`,
+              text: `\n\nSigned by: ${
+                signerName || "Customer"
+              }\nDate: ${new Date().toLocaleDateString()}\n`,
             },
           },
           {
@@ -89,8 +109,10 @@ export default async function handler(req, res) {
       },
     });
 
-    return res.json({ success: true });
-
+    return res.status(200).json({
+      success: true,
+      message: "Signature inserted successfully",
+    });
   } catch (err) {
     console.error("Insert signature error:", err);
     return res.status(500).json({
