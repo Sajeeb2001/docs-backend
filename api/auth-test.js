@@ -1,11 +1,4 @@
 import { google } from "googleapis";
-import { Readable } from "stream";
-
-function base64ToStream(base64Data) {
-  const clean = base64Data.replace(/^data:image\/\w+;base64,/, "");
-  const buffer = Buffer.from(clean, "base64");
-  return Readable.from(buffer);
-}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -19,7 +12,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 🔐 Auth
     const auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
       scopes: [
@@ -28,31 +20,39 @@ export default async function handler(req, res) {
       ]
     });
 
-    const drive = google.drive({ version: "v3", auth });
-    const docs = google.docs({ version: "v1", auth });
+    const authClient = await auth.getClient();
 
-    // 📤 Upload image to Shared Drive
-    const imageStream = base64ToStream(signatureBase64);
+    const drive = google.drive({ version: "v3", auth: authClient });
+    const docs = google.docs({ version: "v1", auth: authClient });
+
+    /* ------------------ Convert base64 to Buffer ------------------ */
+    const base64Data = signatureBase64.replace(/^data:image\/png;base64,/, "");
+    const imageBuffer = Buffer.from(base64Data, "base64");
+
+    /* ------------------ Upload to Shared Drive Folder ------------------ */
+    const fileMetadata = {
+      name: `signature-${Date.now()}.png`,
+      parents: [process.env.SHARED_DRIVE_FOLDER_ID]
+    };
+
+    const media = {
+      mimeType: "image/png",
+      body: imageBuffer
+    };
 
     const upload = await drive.files.create({
-      supportsAllDrives: true,
-      requestBody: {
-        name: `signature-${Date.now()}.png`,
-        mimeType: "image/png",
-        parents: [process.env.SHARED_DRIVE_FOLDER_ID]
-      },
-      media: {
-        mimeType: "image/png",
-        body: imageStream
-      }
+      requestBody: fileMetadata,
+      media,
+      fields: "id",
+      supportsAllDrives: true
     });
 
     const fileId = upload.data.id;
 
-    // 🌍 Make image publicly viewable
+    /* ------------------ Make image public ------------------ */
     await drive.permissions.create({
-      supportsAllDrives: true,
       fileId,
+      supportsAllDrives: true,
       requestBody: {
         role: "reader",
         type: "anyone"
@@ -61,7 +61,9 @@ export default async function handler(req, res) {
 
     const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
 
-    // 📝 Insert text + image into Google Doc
+    /* ------------------ Insert into Google Doc ------------------ */
+    const date = new Date().toLocaleDateString();
+
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: {
@@ -69,7 +71,7 @@ export default async function handler(req, res) {
           {
             insertText: {
               location: { index: 1 },
-              text: `\n\nSigned by: ${signerName}\nDate: ${new Date().toLocaleDateString()}\n`
+              text: `\n\nSigned by: ${signerName}\nDate: ${date}\n`
             }
           },
           {
