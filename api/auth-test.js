@@ -1,18 +1,26 @@
 import { google } from "googleapis";
-import { Readable } from "stream";
 
 export default async function handler(req, res) {
   try {
-    const { docId, signerName, signatureBase64 } = req.body;
+    console.log("RAW BODY:", req.body); // 🔍 DEBUG — KEEP THIS
 
-    if (!docId || !signatureBase64) {
+    if (req.method !== "POST") {
+      return res.status(405).json({ success: false, error: "Method not allowed" });
+    }
+
+    const body = req.body || {};
+    const { docId, signerName, signatureBase64 } = body;
+
+    /* 🔒 HARD VALIDATION */
+    if (!docId || !signatureBase64 || typeof signatureBase64 !== "string") {
       return res.status(400).json({
         success: false,
-        error: "docId and signatureBase64 are required",
+        error: "Missing or invalid fields",
+        received: body,
       });
     }
 
-    /* 1️⃣ AUTH */
+    /* 1️⃣ AUTH (SERVICE ACCOUNT) */
     const auth = new google.auth.JWT(
       process.env.GOOGLE_CLIENT_EMAIL,
       null,
@@ -26,31 +34,32 @@ export default async function handler(req, res) {
     const drive = google.drive({ version: "v3", auth });
     const docs = google.docs({ version: "v1", auth });
 
-    /* 2️⃣ BASE64 → BUFFER */
-    const base64Data = signatureBase64.replace(
-      /^data:image\/\w+;base64,/,
+    /* 2️⃣ BASE64 → BUFFER (CRITICAL) */
+    const cleanedBase64 = signatureBase64.replace(
+      /^data:image\/(png|jpeg|jpg);base64,/,
       ""
     );
-    const imageBuffer = Buffer.from(base64Data, "base64");
+
+    const imageBuffer = Buffer.from(cleanedBase64, "base64");
 
     /* 3️⃣ UPLOAD IMAGE TO SHARED DRIVE */
-    const upload = await drive.files.create({
+    const uploadResponse = await drive.files.create({
       requestBody: {
         name: `signature-${Date.now()}.png`,
-        parents: [process.env.SHARED_DRIVE_FOLDER_ID],
         mimeType: "image/png",
+        parents: [process.env.SHARED_DRIVE_FOLDER_ID], // MUST be Shared Drive
       },
       media: {
         mimeType: "image/png",
-        body: Readable.from(imageBuffer), // ✅ FIX
+        body: imageBuffer, // ✅ BUFFER ONLY
       },
       supportsAllDrives: true,
       fields: "id",
     });
 
-    const fileId = upload.data.id;
+    const fileId = uploadResponse.data.id;
 
-    /* 4️⃣ MAKE FILE PUBLIC (REQUIRED FOR DOCS) */
+    /* 4️⃣ MAKE IMAGE PUBLIC (DOCS NEEDS THIS) */
     await drive.permissions.create({
       fileId,
       supportsAllDrives: true,
@@ -87,12 +96,26 @@ export default async function handler(req, res) {
       },
     });
 
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Insert signature error:", err);
-    res.status(500).json({
+    return res.status(200).json({
+      success: true,
+      message: "Signature inserted into document",
+      imageUrl,
+    });
+
+  } catch (error) {
+    console.error("Insert signature error:", error);
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      error: error.message,
     });
   }
 }
+
+/* 🧠 VERCEL BODY PARSER FIX (MANDATORY) */
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "10mb", // base64 images
+    },
+  },
+};
