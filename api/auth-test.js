@@ -1,7 +1,5 @@
 import { google } from "googleapis";
 import { Readable } from "stream";
-import FormData from "form-data";
-import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   /* ========= CORS ========= */
@@ -84,9 +82,7 @@ export default async function handler(req, res) {
     /* ========= FIND PLACEHOLDER ========= */
     const PLACEHOLDER = "{{SIGNATURE}}";
 
-    const document = await docs.documents.get({
-      documentId: docId,
-    });
+    const document = await docs.documents.get({ documentId: docId });
     const content = document.data.body.content;
 
     let insertIndex = null;
@@ -153,12 +149,15 @@ export default async function handler(req, res) {
     const pdfBuffer = Buffer.from(pdfExport.data);
 
     /* ========= UPLOAD PDF TO SERVICEM8 ========= */
-    const form = new FormData();
-    form.append("file", pdfBuffer, {
-      filename: `signed-${jobUUID}.pdf`,
-      contentType: "application/pdf",
-    });
-    form.append("notes", "Signed document");
+    const formData = new FormData();
+
+    formData.append(
+      "file",
+      new Blob([pdfBuffer], { type: "application/pdf" }),
+      `signed-${jobUUID}.pdf`
+    );
+
+    formData.append("notes", "Signed document");
 
     const basicAuth = Buffer.from(
       `${process.env.SERVICEM8_API_KEY}:`
@@ -170,9 +169,8 @@ export default async function handler(req, res) {
         method: "POST",
         headers: {
           Authorization: `Basic ${basicAuth}`,
-          ...form.getHeaders(),
         },
-        body: form,
+        body: formData,
       }
     );
 
