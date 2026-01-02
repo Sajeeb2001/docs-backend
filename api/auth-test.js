@@ -1,17 +1,15 @@
 import { google } from "googleapis";
 import { Readable } from "stream";
+import FormData from "form-data";
+import fetch from "node-fetch";
+
+const SM8_BASE = "https://api.servicem8.com/api_1.0";
 
 export default async function handler(req, res) {
   /* ========= CORS ========= */
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "POST, OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -23,9 +21,10 @@ export default async function handler(req, res) {
 
     const { docId, signatureBase64, jobUUID } = req.body;
     if (!docId || !signatureBase64 || !jobUUID) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing fields" });
+      return res.status(400).json({
+        success: false,
+        error: "Missing fields",
+      });
     }
 
     /* ========= AUTH ========= */
@@ -148,44 +147,72 @@ export default async function handler(req, res) {
 
     const pdfBuffer = Buffer.from(pdfExport.data);
 
-    /* ========= UPLOAD PDF TO SERVICEM8 ========= */
-    const formData = new FormData();
+    /* ========= SERVICEM8 – STEP 1: CREATE ATTACHMENT ========= */
+    const metadataPayload = {
+      related_object: "job",
+      related_object_uuid: jobUUID,
+      attachment_name: `signed-${jobUUID}.pdf`,
+      file_type: ".pdf",
+      active: true,
+    };
 
-    formData.append(
-      "file",
-      new Blob([pdfBuffer], { type: "application/pdf" }),
-      `signed-${jobUUID}.pdf`
-    );
-
-    formData.append("notes", "Signed document");
-
-    const basicAuth = Buffer.from(
-      `${process.env.SERVICEM8_API_KEY}:`
-    ).toString("base64");
-
-    const serviceM8Response = await fetch(
-      `https://api.servicem8.com/api_1.0/Job/${jobUUID}/Attachment.json`,
+    const metadataResponse = await fetch(
+      `${SM8_BASE}/Attachment.json`,
       {
         method: "POST",
         headers: {
-          Authorization: `Basic ${basicAuth}`,
+          "X-Api-Key": process.env.SERVICEM8_API_KEY,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(metadataPayload),
+      }
+    );
+
+    if (!metadataResponse.ok) {
+      const text = await metadataResponse.text();
+      throw new Error(`ServiceM8 metadata failed: ${text}`);
+    }
+
+    const attachmentUUID =
+      metadataResponse.headers.get("x-record-uuid");
+
+    if (!attachmentUUID) {
+      throw new Error("ServiceM8 did not return attachment UUID");
+    }
+
+    /* ========= SERVICEM8 – STEP 2: UPLOAD PDF ========= */
+    const formData = new FormData();
+    formData.append("file", pdfBuffer, {
+      filename: `signed-${jobUUID}.pdf`,
+      contentType: "application/pdf",
+    });
+
+    const uploadResponse = await fetch(
+      `${SM8_BASE}/Attachment/${attachmentUUID}.file`,
+      {
+        method: "POST",
+        headers: {
+          "X-Api-Key": process.env.SERVICEM8_API_KEY,
+          ...formData.getHeaders(),
         },
         body: formData,
       }
     );
 
-    if (!serviceM8Response.ok) {
-      const errorText = await serviceM8Response.text();
+    if (!uploadResponse.ok) {
+      const text = await uploadResponse.text();
       throw new Error(
-        `ServiceM8 upload failed (${serviceM8Response.status}): ${errorText}`
+        `ServiceM8 upload failed (${uploadResponse.status}): ${text}`
       );
     }
 
     res.json({ success: true });
   } catch (err) {
     console.error("Insert signature error:", err);
-    res
-      .status(500)
-      .json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 }
