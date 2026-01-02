@@ -1,5 +1,7 @@
 import { google } from "googleapis";
 import { Readable } from "stream";
+import FormData from "form-data";
+import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   /* ========= CORS ========= */
@@ -13,7 +15,6 @@ export default async function handler(req, res) {
     "Content-Type"
   );
 
-  // Handle preflight request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -22,8 +23,8 @@ export default async function handler(req, res) {
   try {
     console.log("RAW BODY:", req.body);
 
-    const { docId, signatureBase64 } = req.body;
-    if (!docId || !signatureBase64) {
+    const { docId, signatureBase64, jobUUID } = req.body;
+    if (!docId || !signatureBase64 || !jobUUID) {
       return res
         .status(400)
         .json({ success: false, error: "Missing fields" });
@@ -139,6 +140,48 @@ export default async function handler(req, res) {
       documentId: docId,
       requestBody: { requests },
     });
+
+    /* ========= EXPORT DOC → PDF ========= */
+    const pdfExport = await drive.files.export(
+      {
+        fileId: docId,
+        mimeType: "application/pdf",
+      },
+      { responseType: "arraybuffer" }
+    );
+
+    const pdfBuffer = Buffer.from(pdfExport.data);
+
+    /* ========= UPLOAD PDF TO SERVICEM8 ========= */
+    const form = new FormData();
+    form.append("file", pdfBuffer, {
+      filename: `signed-${jobUUID}.pdf`,
+      contentType: "application/pdf",
+    });
+    form.append("notes", "Signed document");
+
+    const basicAuth = Buffer.from(
+      `${process.env.SERVICEM8_API_KEY}:`
+    ).toString("base64");
+
+    const serviceM8Response = await fetch(
+      `https://api.servicem8.com/api_1.0/Job/${jobUUID}/Attachment.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          ...form.getHeaders(),
+        },
+        body: form,
+      }
+    );
+
+    if (!serviceM8Response.ok) {
+      const errorText = await serviceM8Response.text();
+      throw new Error(
+        `ServiceM8 upload failed (${serviceM8Response.status}): ${errorText}`
+      );
+    }
 
     res.json({ success: true });
   } catch (err) {
