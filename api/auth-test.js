@@ -19,8 +19,8 @@ export default async function handler(req, res) {
   try {
     console.log("RAW BODY:", req.body);
 
-    const { docId, signatureBase64, jobUUID } = req.body;
-    if (!docId || !signatureBase64 || !jobUUID) {
+    const { docId, signatureBase64, jobUUID, key } = req.body;
+    if (!docId || !signatureBase64 || !jobUUID || !key) {
       return res.status(400).json({
         success: false,
         error: "Missing fields",
@@ -151,7 +151,7 @@ export default async function handler(req, res) {
     const metadataPayload = {
       related_object: "job",
       related_object_uuid: jobUUID,
-      attachment_name: `signed-${jobUUID}.pdf`,
+      attachment_name: `${key}.pdf`,
       file_type: ".pdf",
       active: true,
     };
@@ -184,7 +184,7 @@ export default async function handler(req, res) {
     /* ========= SERVICEM8 – STEP 2: UPLOAD PDF ========= */
     const formData = new FormData();
     formData.append("file", pdfBuffer, {
-      filename: `signed-${jobUUID}.pdf`,
+      filename: `${key}.pdf`,
       contentType: "application/pdf",
     });
 
@@ -215,4 +215,4 @@ export default async function handler(req, res) {
       error: err.message,
     });
   }
-} 
+}
