@@ -19,8 +19,9 @@ export default async function handler(req, res) {
   try {
     console.log("RAW BODY:", req.body);
 
-    const { docId, signatureBase64, jobUUID, key } = req.body;
-    if (!docId || !signatureBase64 || !jobUUID || !key) {
+    const { docId, signatureBase64, jobUUID, key, clientName } = req.body;
+
+    if (!docId || !signatureBase64 || !jobUUID || !key || !clientName) {
       return res.status(400).json({
         success: false,
         error: "Missing fields",
@@ -53,7 +54,7 @@ export default async function handler(req, res) {
     const upload = await drive.files.create({
       supportsAllDrives: true,
       requestBody: {
-        name: `signature-${Date.now()}.png`,
+        name: `${clientName}_${jobUUID}.png`, // ✅ UPDATED HERE
         parents: [process.env.SHARED_DRIVE_FOLDER_ID],
         mimeType: "image/png",
       },
